@@ -1,0 +1,880 @@
+---
+title: "Mckinsey predictive modeling test"
+author: "Artur Silicki"
+output:
+  html_document: default
+  pdf_document: default
+  word_document: default
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+### Description
+
+In this project, I am trying to recreate credit scoring process, to the best of my ability. I am using for this task data from Kaggle, which contains information about all loans issued through the 2007-2015 for Lending Club Loan Data. There is no much information about data itself and how it was collected/calculated. Therefore I had to make some assumptions. E.g. I decided to exclude variables, which according to my analysis are "from the future."
+
+### Business Problem
+
+The main objective of this project is to create a credit scoring for the loan application. I will try to predict default for loans using information available during the application process. My intention is to simulate real business problem that's why I will be evaluating model on 'out-of-time' dataset, which contains applications from 2015. I want to create a model which will be stable and will perform well on new unknown applications.
+
+### Agenda
+
+Here are all steps, which were taken during creating this credit scoring model. I divided this project into 2 parts. First is preprocessing and it will be done in R. Second is predictive modeling and it will be done in Python. The steps, that were taken during the pre-processing if the data, are the following:
+
+1. Data analysis
+2. Categorical variables analysis
+  + 2.1. Variables analysis
+  + 2.2. Stability
+3. Numeric variables analysis
+  + 3.1. Missing values
+  + 3.2. Variables analysis
+  + 3.3. Stability
+4. Train and out-of-time datasets
+5. Numeric variables analysis (train and oot datasets)
+  + 5.1. Stability
+  + 5.2. Correlation with target feature
+  + 5.3. New variables
+  + 5.4. WOE Transformation
+6. Categoical variables analysis (train and oot datasets)
+  + 6.1. Stability
+  + 6.2. New variables
+  + 6.3. WOE Transformation
+7. Final dataset
+
+
+```{r import, echo=FALSE}
+library(ggplot2)
+library(dplyr)
+library(ggplot2)
+library('DescTools')
+library(choroplethr)
+library(choroplethrMaps)
+library(scorecard)
+library(unbalanced)
+```
+
+```{r theme and functions, echo=FALSE}
+#Firstly I am loading some functions, which I will be using during this analysis.
+
+#theme for plots
+cbPalette <- c( "#E69F00","#999999", "#56B4E9", "#009E73", "#F0E442", "#0072B2", "#D55E00", "#CC79A7")
+plot_theme = theme(
+  axis.text.y =element_text(size=14, colour='black', face='bold'),
+  axis.text.x =element_text(size=14, vjust=10, colour='black', face='bold'),
+  axis.ticks.x=element_blank(),
+  axis.ticks.y=element_blank(),
+  panel.background = element_blank(),
+  # axis.line = element_blank(),
+  legend.position = 'right',
+  panel.grid.major = element_blank(),
+  axis.title.y = element_text(vjust=0,lineheight=0,size=16, face="bold"),
+  axis.title.x = element_text(lineheight=-5,size=16, face="bold"),
+  legend.title = element_blank(),
+  legend.text = element_text(size=14),
+  legend.key = element_rect(fill = "white"),
+  plot.title = element_text(size=18, vjust = 1.8, face = 'bold'))
+
+
+#Function for checking missing values
+len <- length
+int <- as.numeric
+
+elapsed_months <- function(end_date, start_date) {
+  ed <- as.POSIXlt(end_date)
+  sd <- as.POSIXlt(start_date)
+  12 * (ed$year - sd$year) + (ed$mon - sd$mon)
+}
+
+check_missing <-function(df,big_cutoff=0.9,small_cutoff=0.1){
+  missing_vars <- vector()
+  for (x in 1:len(df)){
+    varname <- colnames(df)[x]
+    if (colMeans(is.na(df[x]))>big_cutoff){
+      print(varname)
+      missing_vars <- c(missing_vars,varname)
+    }else if(colMeans(is.na(df[x]))>small_cutoff){
+      print(varname)
+      missing_vars <- c(missing_vars,varname)    
+      df$dup_var <- df[,x]
+      tmp_df <- group_by(df,issue_d) %>%
+        summarize(count = n(),na_count = sum(is.na(dup_var))/n()*100)
+      # png(paste0("C:/Users/splasi/Documents/data_science/mckinsey/wykresy/missingi/",varname,"_missings.png"), 900, 400)
+      plot122 <- ggplot(tmp_df, aes(x=issue_d,y=na_count)) + geom_bar(stat="identity",fill='orange') +
+        ggtitle(paste0(varname,' - % of missing data ')) + xlab("") + ylab("%")
+      plot122 <- plot122 + plot_theme +ylim(0,100)
+      print(plot122)
+      # dev.off()
+      print(plot122)
+    }
+  }
+  return(missing_vars)
+}
+
+
+#Function for value over time plot
+value_over_time <- function(df,var,folder=""){
+  df <- data.frame(df)
+  if (typeof(var)=="character"){
+    varname <- var
+  }else{
+    varname <- colnames(df)[var]
+  }
+  df$tmp <- df[,var]
+  tmp_df <- group_by(df,issue_d) %>%
+    summarize(avg=mean(tmp,na.rm = TRUE))
+  tmp_df$mav <- zoo::rollmean(tmp_df$avg, 12,fill = list(NA, NULL, NA))
+  desc <- ldict[[varname]]
+  desc <- gsub("[.]",".\n",desc)
+  # png(paste0("C:/Users/splasi/Documents/data_science/mckinsey/wykresy/",folder,"over_time_",varname,".png"), 900, 400)
+  plot122 <- ggplot(tmp_df, aes(x=issue_d,y=avg)) + geom_line(color='orange') + geom_line(aes(x=issue_d,y=mav),color='darkgrey') +
+    ggtitle(paste0(varname,' over time ')) + xlab("") + ylab("")
+  plot122 <- plot122 + plot_theme + labs(caption=desc)
+  print(plot122)
+  # dev.off()
+  print(plot122)
+}
+
+
+#Function to check stability for numeric variables
+check_stability <- function(df,cut_number,cutoff=0.04){
+  not_stable <- vector()
+  for (x in 1:len(df)){
+    varname <- colnames(df)[x]
+    if (varname!="issue_d"){
+        ks <- ks.test(df[,x][1:cut_number],df[,x][400001:nrow(df)])
+        ks_statistic <- int(ks$statistic)
+        # print(varname)
+        # print(ks_statistic)
+        
+        if (ks_statistic>cutoff){
+          print(varname)
+          not_stable <- c(not_stable,varname)
+          df$tmp <- df[,x]
+          value_over_time(df,x,"not_stable/")
+        }      
+    }
+
+  
+  }
+  return(not_stable)
+}
+#Function to check stability for categorical variables
+psi_ls <- function(df,cutoff){
+  PSI_list <- list()
+  for(x in 1:len(df)){
+    print(x)
+    if (!colnames(df)[x] %in%  c("id","issue_d","default","emp_length","purpose","addr_state")){
+
+      varname <- colnames(df)[x]
+      print(varname)
+      df$tmp <- df[,x]
+      train <- data.frame(df[1:cutoff,"tmp"])
+      colnames(train) <- "tmp"
+      train$tmp <- as.character(train$tmp)
+      test <- data.frame(df[cutoff:nrow(df),"tmp"])
+
+      colnames(test) <- "tmp"
+      test$tmp <- as.character(test$tmp)
+      perf_psi(list(train = train, test = test))
+      psi <- perf_psi(list(train = train, test = test))
+      psi$psi$PSI
+      PSI_list[[varname]] <- int(psi$psi$PSI)
+    }
+  }
+  return(PSI_list)
+}
+
+
+#Function to check correlation of numeric variables
+Anova2<- function(df,x){
+  # data_set <- data.frame(cbind(data,zbior_final[[x]]))
+  # colnames(data_set)[length(data_set)] <- colnames(zbior_final)[x]
+  anova_list <- list()
+  for(i in 1:(length(df)-1)){
+    print(i)
+    data_set <- df[which(!is.na(df[,i])),]
+    kt <- kruskal.test(data_set[,length(data_set)]~data_set[,i])
+    stat <- kt$p.value
+    anova_list[i] <- list(c(colnames(data_set)[i],i,stat))
+    
+  }
+  anova_df <- do.call(rbind.data.frame, anova_list)
+  colnames(anova_df) <- c('Name',"Number","p_value")
+  return(anova_df)
+}
+
+
+#Function to caluclate Information Value and WOE for categorical variables
+information_value <- function(df){
+  total_event = sum(df$default)
+  total_nonevent = nrow(df) - total_event
+  IV <- list()
+  IV_list <- list()
+  IV_table <- list()
+  for(x in 1:len(df)){
+    if (colnames(df)[x]!="default"){
+      df$tmp <- df[,x]
+      varname <- colnames(df)[x]
+      df_tmp <- group_by(df,tmp) %>%
+        summarize(count=n(),
+                  bucket_event=sum(default),
+                  event_rate = bucket_event/count,
+                  bucket_nonevent=n()-sum(default),
+                  p_event = bucket_event/total_event,
+                  p_nonevent = bucket_nonevent/total_nonevent,
+                  WOE = log(p_event/p_nonevent),
+                  IV = (p_event-p_nonevent)*WOE
+        ) %>% arrange(tmp)
+      if (nrow(df_tmp[which(df_tmp$WOE=="-Inf"),])>0){
+        df_tmp[which(df_tmp$WOE=="-Inf"),]$WOE <- 0
+        df_tmp[which(df_tmp$IV=="Inf"),]$IV <- 0        
+      }
+      
+      IV_list[[varname]] <- sum(df_tmp$IV)
+      IV_table[[varname]] <- df_tmp
+    }
+  IV[["IVs"]] <- IV_list
+  IV[["table"]] <- IV_table
+  }
+  return(IV)
+}
+df2list <- function(df){
+  new_list <- list()
+  for(x in 1:nrow(df)){
+    rname <- rownames(df)[x]
+    new_list[[rname]] <- as.character(df$Description[x])
+    
+  }
+  return(new_list)
+}
+
+drop_ivs <- function(bins_final){
+  drop_list <- vector()
+  for(lname in names(bins_final)){
+    iv <- bins_final[[lname]]$total_iv[1]
+    if(iv<0.002){
+      drop_list <- c(drop_list,lname)
+    }
+  }
+  return(drop_list)
+}
+
+```
+
+# 1. Data analysis
+
+```{r data, echo=FALSE}
+loandata <- read.csv(file="C:/Users/splasi/Documents/data_science/mckinsey/lending-club-loan-data/loan.csv", header=TRUE, sep=",")
+loan.dict <- read.csv(file="C:/Users/splasi/Documents/data_science/mckinsey/lending-club-loan-data/LCDict.csv", header=TRUE, sep=";",row.names=1)
+ldict <- df2list(loan.dict)
+loandata <- loandata[order(loandata$issue_d),]
+summary(loandata)
+```
+First step of my analysis is to understand the data. I am examining all variables to see if I can use them in the future and how to use them.
+```{r loans count, echo=FALSE}
+loandata$issue_d <- lubridate::parse_date_time(loandata$issue_d, orders = "b-Y", locale = "us")
+loandata$earliest_cr_line <- lubridate::parse_date_time(loandata$earliest_cr_line, orders = "b-Y", locale = "us")
+loandata$year <- format(loandata$issue_d,"%Y")
+tmp_df <- loandata %>% group_by(year) %>%
+          summarize(count=n())
+
+
+plot <- ggplot(tmp_df, aes(x=year,y=count)) + geom_bar(stat="identity",fill=cbPalette[1]) +
+  ggtitle(paste0('Number of loans')) + xlab("") + ylab("")
+plot <- plot + plot_theme + scale_fill_manual(values=cbPalette)
+print(plot)
+```
+
+
+I can see a clear trend - the number of loans is constantly increasing for Lending Club. In 2007-2010 there were almost no loans, compared to recent years. Therefore those years will not be included in final datasets.
+
+```{r some data fixing, echo=FALSE}
+bad_status <- list('Charged Off','Default','Does not meet the credit policy. Status:Charged Off','Late (31-120 days)')
+default <- ifelse(loandata$loan_status %in% bad_status, 1, 0)
+loandata$default = default
+
+
+
+#Sorting####
+loandata <- loandata[order(loandata$issue_d),]
+```
+
+```{r default per year, echo=FALSE}
+default_avg <- group_by(loandata,year) %>% 
+              summarize(count=n(),default_n=sum(default),default_perc=default_n/count*100)
+
+plot <- ggplot(default_avg, aes(x=year,y=default_perc)) + geom_bar(stat="identity",fill=cbPalette[3]) +
+  ggtitle(paste0('Percentage of defaults')) + xlab("") + ylab("%")
+plot <- plot + plot_theme + scale_fill_manual(values=cbPalette) + ylim(0,100)
+print(plot)
+```
+
+I am creating default variable using the following loan statuses:
+
++ Charged off
++ Default
++ Does not meet the credit policy. Status: Charged Off
++ Late (31-120 days)
+
+Then I analyze the percentage of defaults and from what I could see, it was very high at the beginning. Then it became smaller it might be the result of some credit scoring model or the fact that more less risky clients started applying for a loan. In recent years (2015) there are almost no defaults, compared to previous years. It's because these are new loans and most of them haven't got time to become defaults, but certainly in next few years, this percentage will increase.
+```{r ids vs member_ids, echo=FALSE}
+print(paste0("Number of unique ids: ",len(unique(loandata$id))," and member_ids: ",len(unique(loandata$member_id))))
+
+```
+Member_id column is redundant, because of its duplicated ids column. The number of ids is equal to the number of rows in the dataset, therefore there is no need for aggregation. 
+```{r payment plan, echo=FALSE}
+print(table(loandata$pymnt_plan))
+
+```
+pymnt_plan to drop - basically only one value
+```{r desc and title, echo=FALSE}
+loandata$desc <- as.character(loandata$desc)
+loandata[which(loandata$desc==""),]$desc <- NA
+
+title_check <- group_by(loandata,year) %>%
+            summarize(count=n(),
+                      uniq_vals=len(unique(title)),
+                      uniq_per = uniq_vals/count*100,
+                      na_desc=sum(is.na(desc))/count*100)
+print(title_check)
+```
+Both desc and title re features to drop. After 2009 almost all descriptions are missing. From my observations, title variable changes over time. Probably Lending Club decided to categorize titles of applications or moved to selecting a value from a dropdown list instead of allowing to write anything. In 2015 there are only 28 unique values, which is less than 1% of all applications in 2015. In 2007-2009 titles rarely duplicated. Unique title values back then were 74-83% of all applications.
+
+Other variables to drop:
++ loan_status - used for creation defualt
++ url - not useful
++ zip_code - "too many unique values + there is a state feature"
++ earliest_cr_line - used to creation another variable
++ last_pymnt_d - variable "from the future"
++ next_pymnt_d - variable "from the future"
++ last_credit_pull_d - variable "from the future"
+
+There may be more variables "from the future", but because of the fact that there are many steps before keeping a variable in final data step I will check this again after further analysis.
+```{r selection of cat var and drop vars, echo=FALSE}
+char_variables <- c(6,9,10,11,12,13,15,21,24,36,53,56)
+print("Categorical variables")
+print(colnames(loandata)[char_variables])
+
+drop_variables <- c(2,17,18,19,20,22,23,27,46,48,49)
+print("Variables to drop")
+print(colnames(loandata)[drop_variables])
+
+```
+I divided the dataset into separate tables for character and numerical variables.
+
+I also decided to create new variable time_from_earliest_cr. This variable indicates how long the applicant is a customer. Most of the time old client is less risky than new ones.
+```{r time_from_earliest_cr, echo=FALSE}
+loandata$time_from_earliest_cr <- elapsed_months(loandata$issue_d,loandata$earliest_cr_line)
+
+```
+In next few steps, I will try to select variables, based on the percentage of missing values, stability, correlation with target variable etc. I will conduct my analysis on full dataset, instead of creating train and test dataset now. I am aware that some of the statistics I will have to calculate twice, but I want to fully understand data fully. In real life scenario, I would probably have had the knowledge about variables, how they were calculated and what to expect.
+
+# 2. Categorical variables
+## 2.1. Variables analysis
+```{r cat variable analysis, echo=FALSE}
+char_var <- colnames(loandata)[char_variables]
+data_char <- loandata[, names(loandata) %in% c("id","issue_d",char_var) ]
+
+print(paste0("Freq for term variable: ",table(data_char$term)))
+
+```
+
+
+The job title supplied by the Borrower when applying for the loan
+```{r emp_title, echo=FALSE}
+print(paste0("Number of unique values for job title variable ",len(unique(data_char$emp_title))))
+
+```
+Too many unique values -> variable to drop
+
+```{r verification_status, echo=FALSE}
+print(len(unique(data_char$verification_status)))
+print(paste0("Freq for term variable: ",table(data_char$verification_status)))
+
+```
+Verification status vs verification status joint
+```{r verification_status_joint, echo=FALSE}
+print(table(data_char$verification_status_joint,data_char$verification_status))
+
+```
+High correlation between those two variables. I decide to drop verification_status_joint.
+
+Whether the loan is an individual application or a joint application with two co-borrowers
+```{r application_type, echo=FALSE}
+table(data_char$application_type)
+
+```
+Almost every application is an individual one, that's why I decide to drop this variable.
+
+```{r initial_list_status, echo=FALSE}
+table(data_char$initial_list_status)
+
+```
+List of variables to drop:
+```{r cat drop, echo=FALSE}
+drop_char <- c("sub_grade","emp_title","application_type","verification_status_joint")
+print(drop_char)
+data_char <- data_char[, !names(data_char) %in% c(drop_char) ]
+
+```
+Grade is categorized sub_grade. I am using categorization and WOE transformation, so there is no need for "uncategorized" variable.
+
+State analysis
+```{r state_gr plot, echo=FALSE}
+data(state.regions)
+default_df <- loandata[,names(loandata) %in% c("id","default")]
+data_char <- merge(data_char, default_df, by.x = "id", by.y = "id")
+data_char <- merge(data_char, state.regions[,c(1,2)], by.x = "addr_state", by.y = "abb")
+# colnames(data_char)[11:15] <- c("default","region","","")
+data_char <- data_char[order(data_char$issue_d),]
+state_by_value <-
+  data_char %>% group_by(region) %>%
+  summarise(value = mean(default, na.rm=TRUE)*100)
+choroplethr::state_choropleth(state_by_value, title = "Default rate by State")
+
+```
+
+There are not many states where the percentage of defaults are higher than average, but there are states that it's much lower. I will try to group them manually, based on this percentage.
+```{r state_gr stats, echo=FALSE}
+state_by_value <-
+  data_char %>% group_by(addr_state,region) %>%
+  summarise(value = mean(default, na.rm=TRUE)*100) %>% arrange(desc(value))
+
+print(state_by_value)
+
+```
+
+New Groups
+```{r state_gr, echo=FALSE}
+create_state_gr <- function(df){
+  groups = list()
+  groups[[1]] <- as.vector(state_by_value[which(state_by_value$value>0 & state_by_value$value<=4.5),]$addr_state)
+  groups[[2]] <- as.vector(state_by_value[which(state_by_value$value>4.5 & state_by_value$value<=6),]$addr_state)
+  groups[[3]] <- as.vector(state_by_value[which(state_by_value$value>6 & state_by_value$value<=6.5),]$addr_state)
+  groups[[4]] <- as.vector(state_by_value[which(state_by_value$value>6,5 & state_by_value$value<=7),]$addr_state)
+  groups[[5]] <- as.vector(state_by_value[which(state_by_value$value>7 & state_by_value$value<=8),]$addr_state)
+  groups[[6]] <- as.vector(state_by_value[which(state_by_value$value>8),]$addr_state)
+
+  df$state_gr <- 0
+  for(i in 1:6){
+    df$state_gr <- pmax(ifelse(df$addr_state %in% c(groups[[i]]),i,0),df$state_gr)
+  }
+  df <- df[, !names(df) %in% c("addr_state","issue_d","region") ]
+  return(df)
+}
+data_char <- create_state_gr(data_char)
+
+print("Freq for new variable state_gr")
+print(table(data_char$state_gr))
+
+```
+```{r home_ownership, echo=FALSE}
+tmp_df <- loandata %>% group_by(year,home_ownership) %>%
+          summarize(count=n())
+
+
+plot <- ggplot(tmp_df, aes(x=year,y=count,fill=home_ownership)) + geom_bar(stat="identity",position="dodge") +
+  ggtitle(paste0('Home ownership')) + xlab("") + ylab("")
+plot <- plot + plot_theme + scale_fill_manual(values=cbPalette) + theme(axis.text.y=element_blank())
+print(plot)
+
+psi_data_char <- data.frame(data_char[which(!data_char$home_ownership %in% c("ANY","OTHER","NONE")),])
+```
+
+There are almost no loans with values "Any","Other","None" for Home ownership variable. I had to delete those values to calculate PSI correctly.
+##  2.2. Stability
+I wanted to check the stability of categorical variables. There is no point in using not stable predictors while trying to predict future defaults. I am using Population Stability Index (PSI).
+```{r psi, echo=FALSE}
+psi_list <- psi_ls(psi_data_char,400000)
+print(psi_list)
+```
+The threshold for not stable is 0.2. Only initial_list_status is clearly unstable. This analysis will be made again for the training set.
+
+                        
+```{r psi2, echo=FALSE}
+initial_list_status <- table(loandata$year,loandata$initial_list_status)
+print(initial_list_status)
+```
+I examine values for initital_list_status further. I can clearly see that for first few years there is only value "f" for this variable. I will not drop this variable just now. I will decide after creating training set - I don't know which years will be included.
+
+# 3. Numeric variables
+All numeric variables.
+```{r num variable analysis, echo=FALSE}
+numeric_variables <- setdiff(setdiff(c(1:74,76), char_variables),drop_variables)
+numeric_var <- colnames(loandata)[numeric_variables]
+print(numeric_var)
+data_num <- loandata[, names(loandata) %in% c("issue_d",numeric_var) ]
+
+```
+## 3.1. Missing values
+Firstly I am checking, which variables need to be dropped base on high percentage of missing values.
+```{r num missing vars, echo=FALSE}
+missing_vars <- check_missing(data_num)
+
+```
+
+All printed variables above have too many missing values to be considered in finala dataset.
+```{r drop missing vars, echo=FALSE}
+data_num <- data_num[, !names(data_num) %in% c(missing_vars) ]
+
+```
+## 3.2. Variables analysis
+
+In the next few steps I will examine some features in order to see if they are good to use in final dataset.
+```{r num vars analysis pt1, echo=FALSE}
+print(cor(data_num$loan_amnt,data_num$funded_amnt))
+print(cor(data_num$loan_amnt,data_num$funded_amnt_inv))
+```
+Calculated Pearson correlation for funded_amnt, funded_amnt_inv and loan_amn - highly correlated. Therefore funded_amnt and funded_amnt_inv are being dropped.
+```{r num vars analysis pt2, echo=FALSE}
+#Deliquency
+
+# png(paste0("C:/Users/splasi/Documents/data_science/mckinsey/wykresy/deliq_distr.png"), 500, 500)
+plot <- Desc(data_num$delinq_2yrs, main = "Deliquency incidences distribution", plotit = TRUE)
+# dev.off()
+print(plot)
+print("Freq for Deliquency")
+table(data_num$delinq_2yrs)
+```
+
+Analysis at this stage of delinq_2yrs doesn't give any reason to drop this variable.
+#Inquiries
+```{r num vars analysis pt3, echo=FALSE}
+# png(paste0("C:/Users/splasi/Documents/data_science/mckinsey/wykresy/inquries_distr.png"), 500, 500)
+plot <- Desc(data_num$inq_last_6mths, main = "Number of inquiries distribution", plotit = TRUE)
+# dev.off()
+print(plot)
+print("Freq for Number of inquiries")
+table(data_num$inq_last_6mths)
+```
+
+Analysis at this stage of inq_last_6mths doesn't give any reason to drop this variable.
+```{r num vars analysis pt4, echo=FALSE}
+
+data_num <- merge(data_num,loandata[c("id","time_from_earliest_cr")],by="id")
+# png(paste0("C:/Users/splasi/Documents/data_science/mckinsey/wykresy/time_from_earliest_cr_distr.png"), 500, 500)
+plot <- Desc(data_num$time_from_earliest_cr, main = "Time from earliest credit line distribution", plotit = TRUE)
+# dev.off()
+print(plot)
+```
+Analysis at this stage of time_from_earliest_cr doesn't give any reason to drop this variable.
+```{r num vars analysis pt5, echo=FALSE}
+value_over_time(data_num,"open_acc") 
+```
+
+Open_acc isn't very stable when we look at all dates, but it can be in the final dataset.
+
+```{r num vars analysis pt6, echo=FALSE}
+value_over_time(data_num,"collection_recovery_fee")
+```
+
+Same applies to collection_recovery_fee.
+
+```{r num vars analysis pt7, echo=FALSE}
+table(data_num$pub_rec)
+```
+
+Pub_rec has over 80% 0 values, but is not dropped at this stage.
+collections_12_mths_ex_med
+```{r num vars analysis pt8, echo=FALSE}
+table(data_num$collections_12_mths_ex_med)
+value_over_time(data_num,"collections_12_mths_ex_med")
+```
+
+I can observe that collections_12_mths_ex_med has non zero values only after 2012 and there is a clear trend. From my personal standpoint, it has values only in last few years because the number of collections in last 12 month applies to new loans. For that reason I reckon this variable is calculated for 2015, not at the moment of applying for the loan - variable "from the future".
+
+```{r num vars analysis pt9, echo=FALSE}
+value_over_time(data_num,"tot_coll_amt")
+```
+
+Same applies to tot_coll_amt - variable "from the future"
+
+```{r num vars analysis pt10, echo=FALSE}
+unique(data_num$policy_code)
+```
+Policy_code has only one value and that's the reason why it's dropped.
+
+Other variables that are dropped, because I think they are "from the future", based only on the description are:
++ funded_amnt
++ funded_amnt_inv
++ recoveries
+
+We cannot e.g. have information about post charge off gross recovery at the moment of applying for the loan if it applies to the same loan and I believe it does.
+```{r dropping variables, echo=FALSE}
+num_drop_vars <- c("funded_amnt","funded_amnt_inv",'collection_recovery_fee',"policy_code","recoveries")
+
+data_num <- data_num[, !names(data_num) %in% c(num_drop_vars) ]
+```
+
+## 3.3. Stability
+Next, I will check the stability of numerical variables on the whole dataset. I will conduct this analysis one more time on a training set, but for now, I want to once again check if some variables aren't "from the future".
+```{r num stability, echo=FALSE}
+not_stable <- check_stability(data_num[2:(len(data_num)-1)],400000,0.2)
+# data_num <- data_num[, !names(data_num) %in% c(not_stable) ]
+```
+
+The warning message is due to the implementation of the KS test in R, which expects a continuous distribution and thus there should not be any identical values in the two datasets i.e. ties. It's hard to comply with this assumption and that's why stability is checked together with plots analysis.
+```{r from_the_future, echo=FALSE}
+from_the_future <- c("out_prncp","out_prncp_inv","dti","total_pymnt","total_pymnt_inv","total_rec_prncp","total_rec_int","last_pymnt_amnt","tot_coll_amt","total_rev_hi_lim")
+print(from_the_future)
+```
+List of variables, which aren't stable and I believe they were calculated for the year 2015, not for the year of issuing the loan.
+# 4. Train and out-of-time datasets
+```{r num test train, echo=FALSE}
+oot <- loandata[which(loandata$issue_d>='2015-01-01' & loandata$issue_d<='2015-03-01'),]
+train <- loandata[which(loandata$issue_d>='2012-01-01' & loandata$issue_d<='2015-01-01'),]
+train_default <- train[c("id","default")]
+print(paste0("Number of loans in out-of-time dataset: ",nrow(oot)))
+print(paste0("Number of loans in train dataset: ",nrow(train)))
+
+```
+In train dataset I am selecting all loans from 2012-2015. Before 2012 there are only few loans as compared to recent years. What is more there is no point in building strategy on all applications. Profile of customer is changing over time, values for variables are changing over the time that's why it's necessery to select recent history. In 2015 there is little information about defaults, that's why I am selecting only loans, which are at least 9 months old.
+
+# 5. Numeric variables analysis (train and oot datasets)
+In next few steps, I am selecting same numeric variables from out-of-time and train dataset, just like I did for the whole dataset.
+```{r num train variable analysis, echo=FALSE}
+train_num <- train[, names(train) %in% c("issue_d",numeric_var) ]
+test_num <-  oot[, names(oot) %in% c("issue_d",numeric_var) ]
+
+```
+
+
+
+```{r drop train missing vars, echo=FALSE}
+train_num <- train_num[, !names(train_num) %in% c(missing_vars) ]
+
+```
+
+```{r num train variable mssings, echo=FALSE}
+missing_vars2 <- check_missing(train_num,0.5,0.1)
+```
+
+```{r dropping train variables, echo=FALSE}
+num_drop_vars <- c("funded_amnt","funded_amnt_inv",'collection_recovery_fee',"policy_code","recoveries")
+
+train_num <- train_num[, !names(train_num) %in% c(num_drop_vars,from_the_future) ]
+
+```
+
+## 5.1. Stability
+I run stability check one more time. I truncated the data, distributions could change. Therefore I want to run those tests one more time.
+```{r num train stability, echo=FALSE}
+half_of_dataset <- round(nrow(train_num)/2)
+not_stable <- check_stability(train_num[2:(len(train_num)-1)],half_of_dataset,0.2)
+train_num <- train_num[, !names(train_num) %in% c(not_stable) ]
+print(not_stable) 
+```
+There are no new unstable variables.
+
+## 5.2. Correlation with target feature
+I check the correlation between features and default. Normally in order to check if a feature is correlated with target variable, I would use ANOVA, but to use ANOVA, some requirements must be met, like homogenous variance. It's used only for feature extraction, that's why I prefer nonparametric method. I am using Kruskal test.
+
+Those variables aren't correlated with default.
+```{r num train corr, echo=FALSE}
+data_set_num <- train_num
+data_set_num <- merge(data_set_num, train_default, by = "id")
+data_set_num <- data_set_num[,!names(data_set_num) %in% c("id","issue_d","year")]
+ind_default <- which(colnames(data_set_num)=="default")
+print(ind_default)
+# data.set.cont.t <-Anova2(data_set_num,ind_default)
+# print(data.set.cont.t)
+# corr_check <- cbind(group_by(data_set_num,default) %>%
+#               summarize(count=n()),group_by(data_set_num,default) %>%
+#               summarize_all(funs(mean(., na.rm = TRUE))))
+# 
+# print(corr_check)
+
+no_corr_vars <- c("delinq_2yrs","acc_now_delinq","revol_bal","tot_cur_bal","issue_d","collections_12_mths_ex_med")
+train_num <- train_num[, !names(train_num) %in% c(no_corr_vars) ]
+train_num <- merge(train_num, train_default, by = "id")
+print(no_corr_vars)
+```
+
+## 5.3. New variables
+I create some new variables. I am able to calculate mean values for each state of all my variables. Then compare values of those variables to the average value for a state where the loan application is issued. Loan amount doesn't have to be predictive by itself, but maybe when we compare it to average loan amount in a state we can use to determine whether too high value of this parameter indicates default or not.
+```{r new train variables, echo=FALSE}
+test_num <- test_num[,names(test_num) %in% names(train_num)]
+
+new_num_var <- function(df,df_all){
+  df <- merge(df,df_all[c("id","addr_state")],by="id")
+  cols <- colnames(df)
+  cols <- cols[!cols %in% c("id","year","default")]
+  mean_vals <- group_by(df[,!names(df) %in% c("year","default")],addr_state) %>%
+    summarise_all(funs(mean(., na.rm = TRUE)))
+  colnames(mean_vals) <- c("addr_state",paste0("avg_", colnames(mean_vals))[2:len(mean_vals)])
+  df = merge(df, mean_vals, by = "addr_state")
+  for(x in 1:len(cols)){
+    var = colnames(df)[x]
+    new_var = paste0("st_com_",var)
+    avg_var = paste0("avg_",var)
+    df[[new_var]] = df[[var]]/df[[avg_var]]
+    
+  }
+  
+  df <- df[, !names(df) %in% c("addr_state","st_com_addr_state",colnames(mean_vals)[2:len(mean_vals)]) ]
+  df <- merge(df,df_all[c("id","default")],by="id")
+  return(df)
+}
+train_num <- new_num_var(train_num,train)
+test_num <- new_num_var(test_num,oot)
+```
+## 5.4. WOE Transformation
+
+In the next step, WOE transformation is used. WOE transformation is common practice in credit scoring. It has many benefits, such as:
++ less probability of overfitting
++ there is no need for imputation of missing data
++ less collinearity
++ numeric and character variables are treated the same way
++ immune to outliers
++ less parameters to estimate (no dummy variables)
+
+The calculated variables are monotonic in relation to the level of risk (event rate). This is important for linear models, to keep variables interpretable. 
+```{r woe, echo=FALSE}
+train_num <- data.frame(train_num)
+test_num <- test_num[,names(test_num) %in% colnames(train_num)]
+bins = woebin(train_num, y="default",max_num_bin = 5)
+bins_df <- data.table::rbindlist(bins)
+train_num <- data.frame(train_num)
+#This function is interactive and cannot be used in Html/Word Document.
+# breaks_adj = woebin_adj(train_num, y="default", bins)
+
+breaks_adj <- "list( \n loan_amnt=c(c(4000,8500, 15500, 28500)),
+                \n int_rate=c(9.5, 13, 17, 21),
+                \n installment=c(140, 400, 700, 1000),
+                \n annual_inc=c(30000, 50000, 75000, 105000),
+                \n delinq_2yrs=c(c(0,1,2)),
+                \n inq_last_6mths=c(c(1,2,3)),
+                \n open_acc=c(7, 11, 12, 13),
+                \n pub_rec=c(c(1,2)),
+                \n revol_util=c(c(20, 35, 60, 75,90)),
+                \n total_acc=c(12, 26, 34),
+                \n total_rec_late_fee=c(c(1)),
+                \n st_com_installment=c(0.55, 1.35, 2),
+                \n st_com_loan_amnt=c(0.55, 0.8, 1.1, 1.35),
+                \n st_com_int_rate=c(0.55, 0.7, 0.95, 1.25, 1.5),
+                \n st_com_annual_inc=c(0.4, 0.65, 1.05, 1.6),
+                \n st_com_delinq_2yrs=c(2, 6),
+                \n st_com_inq_last_6mths=c(0.7, 1.3, 2.7, 3.5),
+                \n st_com_open_acc=c(0.6, 0.65, 0.85, 1),
+                \n st_com_pub_rec=c(4, 6),
+                \n st_com_revol_util=c(0.35, 0.65, 1, 1.3),
+                \n data.Y=c(\"0%,%1\")\n )"
+train_num <- data.frame(train_num)
+bins_final = woebin(train_num[,!names(train_num) %in% c("id","year")], y="default",
+                    breaks_list=breaks_adj)
+
+
+drop_list <- drop_ivs(bins_final)
+train_num <- data.frame(train_num)
+train_num <- train_num[,!names(train_num) %in% drop_list]
+train_num_woe = woebin_ply(train_num, bins=bins_final)
+
+test_num <- test_num[,!names(test_num) %in% drop_list]
+test_num_woe = woebin_ply(test_num, bins=bins_final)
+print(train_num_woe[1:10,])
+
+print("New variables after WOE transformation")
+print(colnames(train_num_woe))
+
+
+```
+
+final_num_vars <- c("loan_amnt","int_rate","annual_inc","dti","delinq_2yrs","inq_last_6mths","open_acc","pub_rec","revol_util","total_acc","total_rec_late_fee","collections_12_mths_ex_med","total_rev_hi_lim")
+
+# 6. Categoical variables analysis (train and oot datasets)
+```{r char train, echo=FALSE}
+char_var <- colnames(train)[char_variables]
+char_train <- train[, names(train) %in% c("id","issue_d",char_var) ]
+char_train <- char_train[, !names(char_train) %in% c(drop_char) ]
+char_test <- oot[, names(oot) %in% c("id","issue_d",char_var) ]
+char_test <- char_test[, !names(char_test) %in% c(drop_char) ]
+```
+## 6.1. Stability
+To check stability of categorical variables I am using PSI metric.
+```{r psi train, echo=FALSE}
+psi_list <- psi_ls(char_train,half_of_dataset)
+print(psi_list)
+
+```
+## 6.2. New variables
+I am making some transformations - similar to those I did on the whole dataset. E.g. I am creating state_gr variable
+```{r char sample, echo=FALSE}
+
+char_train <- merge(char_train, train_default, by.x = "id", by.y = "id")
+char_train <- merge(char_train, state.regions[,c(1,2)], by.x = "addr_state", by.y = "abb")
+# colnames(char_train)[11:15] <- c("default","region","","")
+char_train <- char_train[order(char_train$issue_d),]
+
+```
+
+```{r sample state_gr, echo=FALSE}
+
+char_train <- create_state_gr(char_train)
+char_test <- create_state_gr(char_test)
+head(char_train,3)
+```
+
+## 6.3. WOE Transformation
+I am using WOE transformation the same I was using it for numeric variables.
+```{r woe char, echo=FALSE}
+bins = woebin(char_train, y="default",max_num_bin = 5)
+bins_df <- data.table::rbindlist(bins)
+#This function is interactive and cannot be used in Html/Word Document.
+char_train <- data.frame(char_train)
+# breaks_adj = woebin_adj(char_train, y="default", bins)
+
+breaks_adj <- "list(\n id=c(\"6000000\", \"8000000\", \"29000000\"),
+                    \n term=c(\" 36 months\", \" 60 months\"),
+                    \n grade=c(\"A\", \"B\", \"C\", \"D\", \"E\",\"F\",\"G\"),
+                    \n emp_length=c(\"< 1 year%,%1 year\", \"10+ years\", \"2 years%,%3 years%,%4 years\", \"5 years%,%6 years%,%7 years%,%8 years%,%9 years\",\"n/a\"),
+                    \n home_ownership=c(\"MORTGAGE\", \"NONE%,%OTHER%,%OWN\", \"RENT\"),
+                    \n verification_status=c(\"Not Verified\", \"Source Verified\", \"Verified\"),
+                    \n purpose=c(\"car%,%credit_card\", \"debt_consolidation\", \"home_improvement%,%house%,%major_purchase\", \"medical%,%moving%,%other%,%renewable_energy%,%small_business%,%vacation%,%wedding\"),
+                    \n initial_list_status=c(\"f\", \"w\"),
+                    \n state_gr=c(1,2,3,4,5)\n )"
+char_train <- data.frame(char_train)
+bins_final = woebin(char_train[,!names(char_train) %in% c("id","year")], y="default",
+                    breaks_list=breaks_adj)
+
+drop_list <- drop_ivs(bins_final)
+char_train <- data.frame(char_train)
+char_train <- char_train[,!names(char_train) %in% drop_list]
+char_train_woe = woebin_ply(char_train, bins=bins_final)
+
+char_test <- char_test[,names(char_test) %in% colnames(char_train)]
+char_test_woe = woebin_ply(char_test, bins=bins_final)
+
+```
+
+# 7. Final dataset
+```{r final datasets, echo=FALSE}
+final_train <- merge(train_num_woe,char_train_woe,by=c("id","default"), all.x = TRUE)
+final_test <- merge(test_num_woe,char_test_woe,by=c("id"))
+```
+
+```{r a priori probability, echo=FALSE}
+p_apriori_train <- sum(final_train$default)/nrow(final_train)
+p_apriori_test <- sum(final_test$default)/nrow(final_test)
+
+print(paste0("Percentage of defaults in train dataset: ",round(p_apriori_train*100,2),"%"))
+print(paste0("Percentage of defaults in out of time dataset: ",round(p_apriori_test*100,2),"%"))
+```
+In the training, dataset defaults are 10,5% of all observations. To learn predictive models later in my work I decide to use undersampling. Undersampling is common practice in credit scoring to help models predict defaults correctly.
+```{r undersampling, echo=FALSE}
+#Undersampling
+final_train <- data.frame(final_train)
+# n<-ncol(final_train)
+output<-as.factor(final_train$default)
+input<-final_train[ ,-2]
+data<-ubBalance(X= input, Y=output, type="ubUnder", verbose=TRUE)
+train_sample<-data.frame(cbind(data$X,data$Y))
+colnames(train_sample)[len(train_sample)] <- "default"
+
+# final_train$grade <- NULL
+# write.csv(final_train,"C:/Users/splasi/Documents/data_science/mckinsey/final_train.csv")
+# write.csv(train_sample,"C:/Users/splasi/Documents/data_science/mckinsey/train_sample.csv")
+# write.csv(final_test,"C:/Users/splasi/Documents/data_science/mckinsey/final_test.csv")
+```
+In the last step of R analysis, I am saving 3 datasets: train, out-of-time and one after undersampling.
